@@ -1,0 +1,13 @@
+# 1. Ignore everything by default
+*
+
+# 2. Allow Git to traverse subdirectories
+!*/
+
+# 3. Keep .gitignore itself
+!.gitignore
+
+# 4. Whitelist only Fortran source files and Makefile
+!*.f90
+!**/*.f90
+!Makefile

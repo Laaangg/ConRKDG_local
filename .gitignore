@@ -1,0 +1,9 @@
+# 1. Ignore everything by default
+*
+
+# 2. Keep .gitignore itself
+!.gitignore
+
+# 2. Allow Git to traverse below
+!fortran_2D
+!MATLAB_prototype_refactor
