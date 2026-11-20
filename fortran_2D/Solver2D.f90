@@ -112,7 +112,7 @@ contains
     end if
 
     if (present(saveEvery)) then
-      solver%saveEvery = max(1, saveEvery)
+      solver%saveEvery = max(0, saveEvery)
     else
       solver%saveEvery = 1
     end if
@@ -589,7 +589,11 @@ contains
         write(*,'(A,F6.2,A,F8.4,A)') 'Export Mode: FPS (Target FPS: ', solver%saveFPS, &
                                     ', Frame Interval dt: ', solver%frameInterval, ')'
       else
-        write(*,'(A,I0,A)') 'Export Mode: STEP (Every ', solver%saveEvery, ' steps)'
+        if (solver%saveEvery > 0) then
+          write(*,'(A,I0,A)') 'Export Mode: STEP (Every ', solver%saveEvery, ' steps)'
+        else
+          write(*,'(A)') 'Export Mode: STEP (saveEvery=0, per-step snapshot printing disabled)'
+        end if
       end if
       if (solver%saveCurrent) then
         write(*,'(A)') 'At-The-Moment Checkpoint: enabled (sol_current overwritten each step)'
@@ -606,7 +610,9 @@ contains
         solver%frameCount    = 1
         solver%nextFrameTime = solver%frameInterval
       else
-        call writeStepSolution(solver, mesh, 0, solver%t, isFrame=.false.)
+        if (solver%saveEvery > 0) then
+          call writeStepSolution(solver, mesh, 0, solver%t, isFrame=.false.)
+        end if
       end if
 
       ! Write initial sol_current checkpoint
@@ -665,9 +671,11 @@ contains
             solver%nextFrameTime = min(solver%t_final, solver%nextFrameTime + solver%frameInterval)
           end if
         else
-          if (mod(solver%step_count, solver%saveEvery) == 0 .or. &
-              abs(solver%t - solver%t_final) <= 1.0e-12_8) then
-            call writeStepSolution(solver, mesh, solver%step_count, solver%t, isFrame=.false.)
+          if (solver%saveEvery > 0) then
+            if (mod(solver%step_count, solver%saveEvery) == 0 .or. &
+                abs(solver%t - solver%t_final) <= 1.0e-12_8) then
+              call writeStepSolution(solver, mesh, solver%step_count, solver%t, isFrame=.false.)
+            end if
           end if
         end if
       end if
@@ -681,10 +689,6 @@ contains
     end do
 
     solver%nt = solver%step_count
-    if (solver%enableOutput .and. solver%monitorUnit /= 0) then
-      close(solver%monitorUnit)
-      solver%monitorUnit = 0
-    end if
 
     write(*,'(A,I0,A)') 'Simulation Complete! Total steps: ', solver%nt, '.'
     deallocate(U_curr, U1, U2, U_new, L1, L2, L3)
@@ -939,14 +943,20 @@ contains
 
   ! -------------------------------------------------------------------
   ! Compute and write final L1, L2, Linf errors to errors.txt
+  ! and finalize monitor.txt with total elapsed CPU time
   ! -------------------------------------------------------------------
-  subroutine writeFinalErrors(solver, prob, mesh)
+  subroutine writeFinalErrors(solver, prob, mesh, elapsed_cpu)
     type(Solver2D_t), intent(inout) :: solver
     type(Prob2D_t),   intent(in)    :: prob
     type(Mesh2D_t),   intent(in)    :: mesh
+    real(8), optional, intent(in)   :: elapsed_cpu
 
     character(256) :: errFile
     integer        :: fid
+
+    if (present(elapsed_cpu)) then
+      solver%elapsedCPU = elapsed_cpu
+    end if
 
     call computeErrors(solver, prob, mesh)
 
@@ -959,12 +969,19 @@ contains
     if (solver%enableOutput) then
       errFile = trim(solver%outputDir) // '/errors.txt'
       open(newunit=fid, file=trim(errFile), status='replace', action='write')
-      write(fid, '(A)') '# Nx Ny m_degree n_sub nt L1_Error L2_Error Linf_Error'
-      write(fid, '(5(I0,1X),3(ES22.15,1X))') &
+      write(fid, '(A)') '# Nx Ny m_degree n_sub nt L1_Error L2_Error Linf_Error Elapsed_CPU_s'
+      write(fid, '(5(I0,1X),4(ES22.15,1X))') &
         mesh%Nx, mesh%Ny, mesh%m_degree, mesh%n_sub, solver%nt, &
-        solver%L1err, solver%L2err, solver%Linferr
+        solver%L1err, solver%L2err, solver%Linferr, solver%elapsedCPU
       close(fid)
       write(*,'(A,A)') 'Results & step snapshots written to: ', trim(solver%outputDir)
+
+      ! Write total elapsed CPU time to monitor.txt and close unit
+      if (solver%monitorUnit /= 0) then
+        write(solver%monitorUnit, '(A,F10.4,A)') '# Total Elapsed CPU Time: ', solver%elapsedCPU, ' s'
+        close(solver%monitorUnit)
+        solver%monitorUnit = 0
+      end if
     end if
   end subroutine writeFinalErrors
 
@@ -973,6 +990,10 @@ contains
   ! -------------------------------------------------------------------
   subroutine free_Solver2D(solver)
     type(Solver2D_t), intent(inout) :: solver
+    if (solver%monitorUnit /= 0) then
+      close(solver%monitorUnit)
+      solver%monitorUnit = 0
+    end if
     if (allocated(solver%U))          deallocate(solver%U)
     if (allocated(solver%rhs))        deallocate(solver%rhs)
     if (allocated(solver%isTroubled)) deallocate(solver%isTroubled)
