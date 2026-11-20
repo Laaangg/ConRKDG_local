@@ -34,6 +34,7 @@ module Solver2D
     real(8) :: L1err   = 0.0_8
     real(8) :: L2err   = 0.0_8
     real(8) :: Linferr = 0.0_8
+    real(8) :: elapsedCPU = 0.0_8
 
     ! ANSYS-style per-step file output settings (Choice A)
     logical        :: enableOutput   = .true.
