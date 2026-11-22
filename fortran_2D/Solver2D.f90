@@ -4,6 +4,7 @@ module Solver2D
   use Mesh2D
   use WENO
   use GaussQuadrature1D
+  use GaussQuadrature2D
   implicit none
 
   type :: Solver2D_t
@@ -170,25 +171,17 @@ contains
   ! Evaluate Initial Conditions via 2D Sub-Cell Gauss Quadrature
   ! Matches Solver.setIC (Solver.m, Lines 103-166; Paper Sec. 2.3 Eq. 13)
   ! -------------------------------------------------------------------
-  subroutine setIC(solver, prob, mesh, n_quad_pts)
-    type(Solver2D_t),  intent(inout) :: solver
-    type(Prob2D_t),    intent(in)    :: prob
-    type(Mesh2D_t),    intent(inout) :: mesh
-    integer, optional, intent(in)    :: n_quad_pts
+  subroutine setIC(solver, prob, mesh)
+    type(Solver2D_t), intent(inout) :: solver
+    type(Prob2D_t),   intent(in)    :: prob
+    type(Mesh2D_t),   intent(inout) :: mesh
 
-    integer :: nG, c, sCell_x, sCell_y, sub_id, qx, qy
-    real(8) :: x_start, y_start, x0, y0, u_sum, u_exact, weight_2D
-    real(8), allocatable :: xq(:), yq(:)
-    type(GaussQuadrature1D_t) :: GQ_IC
+    integer :: c, sCell_x, sCell_y, sub_id, q
+    real(8) :: x_start, y_start, x0, y0, u_sum, xq, yq
+    real(8) :: dx_sub, dy_sub
 
-    if (present(n_quad_pts)) then
-      nG = n_quad_pts
-    else
-      nG = 5
-    end if
-
-    call init_GaussQuadrature1D(GQ_IC, nG)
-    allocate(xq(nG), yq(nG))
+    dx_sub = mesh%dx_sub
+    dy_sub = mesh%dy_sub
 
     do c = 1, mesh%numCells
       x_start = mesh%cells(c)%Centroid(1) - 0.5_8 * mesh%dx
@@ -198,30 +191,24 @@ contains
         do sCell_x = 1, mesh%n_sub
           sub_id = (sCell_y - 1) * mesh%n_sub + sCell_x
 
-          x0 = x_start + real(sCell_x - 1, 8) * mesh%dx_sub
-          y0 = y_start + real(sCell_y - 1, 8) * mesh%dy_sub
+          x0 = x_start + real(sCell_x - 1, 8) * dx_sub
+          y0 = y_start + real(sCell_y - 1, 8) * dy_sub
 
-          xq = 0.5_8 * mesh%dx_sub * GQ_IC%xGauss + (x0 + 0.5_8 * mesh%dx_sub)
-          yq = 0.5_8 * mesh%dy_sub * GQ_IC%xGauss + (y0 + 0.5_8 * mesh%dy_sub)
+          mesh%cells(c)%SubCellCentroids(sub_id, 1) = x_start + (real(sCell_x, 8) - 0.5_8) * dx_sub
+          mesh%cells(c)%SubCellCentroids(sub_id, 2) = y_start + (real(sCell_y, 8) - 0.5_8) * dy_sub
 
-          mesh%cells(c)%SubCellCentroids(sub_id, 1) = x_start + (real(sCell_x, 8) - 0.5_8) * mesh%dx_sub
-          mesh%cells(c)%SubCellCentroids(sub_id, 2) = y_start + (real(sCell_y, 8) - 0.5_8) * mesh%dy_sub
-
+          ! Exact sub-cell integration using pre-computed 2D Gauss-Legendre quadrature
           u_sum = 0.0_8
-          do qy = 1, nG
-            do qx = 1, nG
-              u_exact   = eval_IC(prob, xq(qx), yq(qy))
-              weight_2D = 0.25_8 * GQ_IC%wGauss(qx) * GQ_IC%wGauss(qy)
-              u_sum     = u_sum + u_exact * weight_2D
-            end do
+          do q = 1, mesh%gq_sub%nTotal
+            xq = x0 + 0.5_8 * dx_sub * (1.0_8 + mesh%gq_sub%xi(q))
+            yq = y0 + 0.5_8 * dy_sub * (1.0_8 + mesh%gq_sub%eta(q))
+            u_sum = u_sum + eval_IC(prob, xq, yq) * mesh%gq_sub%w2D(q)
           end do
 
           solver%U(sub_id, c) = u_sum
         end do
       end do
     end do
-
-    deallocate(xq, yq, GQ_IC%xGauss, GQ_IC%wGauss)
   end subroutine setIC
 
   ! -------------------------------------------------------------------
@@ -239,7 +226,7 @@ contains
     inv_dt = (prob%maxSpeedX / mesh%dx_sub) + (prob%maxSpeedY / mesh%dy_sub)
     dt_cfl = 1.0_8 / inv_dt
 
-    if (trim(solver%typeCFL) == 'Exact' .and. prob%withExact == 1 .and. mesh%n_sub > 3) then
+    if (trim(solver%typeCFL) == 'Exact' .and. prob%withExact == 1) then
       dt_out = solver%CFL * (dt_cfl)**(real(mesh%n_sub, 8) / 3.0_8)
     else
       dt_out = solver%CFL * dt_cfl
@@ -721,36 +708,96 @@ contains
 
   ! -------------------------------------------------------------------
   ! Compute L1, L2 (Eq. 54), and Linf (Eq. 55) Errors at Current Time
-  ! Matches Solver.computeErrors (Solver.m, Lines 562-594)
+  ! Using High-Order Gauss Quadrature matching Dr. Binh's Paper & 1D Solver
   ! -------------------------------------------------------------------
   subroutine computeErrors(solver, prob, mesh)
     type(Solver2D_t), intent(inout) :: solver
     type(Prob2D_t),   intent(in)    :: prob
     type(Mesh2D_t),   intent(in)    :: mesh
 
-    integer :: ny_grid, nx_grid
-    real(8) :: sub_area
-    real(8), allocatable :: X_plot(:,:), Y_plot(:,:), U_plot(:,:), U_exact(:,:), diff_U(:,:)
+    integer :: c, qx, qy, sx, sy, sub_id, nq, ns
+    real(8) :: x_left, y_bottom, dx_sub, dy_sub, sub_area
+    real(8) :: x_val, y_val, u_ex, u_num, diff, weight_2D
+    real(8) :: err_L1_sum, err_L2_sum, err_Linf_max
+    real(8) :: U_mat(mesh%n_sub, mesh%n_sub)
+    real(8), allocatable :: U_h_quad(:,:)
+    real(8), allocatable :: H_quad_T(:,:)
+
+    ! Sub-cell exact average integration using pre-computed mesh%gq_sub
+    real(8) :: x0, y0, u_ex_ave, xq_sub, yq_sub, diff_sub, err_Linf_sub
+    integer :: q_sub
 
     if (prob%withExact /= 1) return
 
-    ny_grid = mesh%Ny * mesh%n_sub
-    nx_grid = mesh%Nx * mesh%n_sub
-    allocate(X_plot(ny_grid, nx_grid), Y_plot(ny_grid, nx_grid))
-    allocate(U_plot(ny_grid, nx_grid), U_exact(ny_grid, nx_grid), diff_U(ny_grid, nx_grid))
+    ns       = mesh%n_sub
+    nq       = mesh%n_quad
+    dx_sub   = mesh%dx_sub
+    dy_sub   = mesh%dy_sub
+    sub_area = dx_sub * dy_sub
 
-    call getSpatialGrid(mesh, X_plot, Y_plot)
-    call mapStateToGrid(solver%U, mesh, U_plot)
+    allocate(U_h_quad(nq, nq))
+    allocate(H_quad_T(nq, ns))
+    H_quad_T = transpose(mesh%H_quad)
 
-    U_exact  = eval_exact(prob, X_plot, Y_plot, solver%t)
-    diff_U   = abs(U_plot - U_exact)
-    sub_area = mesh%dx_sub * mesh%dy_sub
+    err_L1_sum   = 0.0_8
+    err_L2_sum   = 0.0_8
+    err_Linf_max = 0.0_8
+    err_Linf_sub = 0.0_8
 
-    solver%L1err   = sum(diff_U) * sub_area
-    solver%L2err   = sqrt(sum(diff_U * diff_U) * sub_area)
-    solver%Linferr = maxval(diff_U)
+    do c = 1, mesh%numCells
+      x_left   = mesh%cells(c)%Centroid(1) - 0.5_8 * mesh%dx
+      y_bottom = mesh%cells(c)%Centroid(2) - 0.5_8 * mesh%dy
 
-    deallocate(X_plot, Y_plot, U_plot, U_exact, diff_U)
+      U_mat = reshape(solver%U(:, c), [ns, ns])
+
+      ! 1. Continuous polynomial reconstruction evaluated at 2D Gauss nodes
+      !    U_h_quad(qx, qy) = sum_{sx, sy} U_mat(sx, sy) * H_{sx}(xi_qx) * H_{sy}(eta_qy)
+      U_h_quad = matmul(H_quad_T, matmul(U_mat, mesh%H_quad))
+
+      do qy = 1, nq
+        y_val = y_bottom + mesh%xq(qy) * dy_sub
+        do qx = 1, nq
+          x_val = x_left + mesh%xq(qx) * dx_sub
+
+          u_num = U_h_quad(qx, qy)
+          u_ex  = eval_exact(prob, x_val, y_val, solver%t)
+          diff  = abs(u_num - u_ex)
+
+          weight_2D = mesh%wq(qx) * mesh%wq(qy) * sub_area
+
+          err_L1_sum   = err_L1_sum + diff * weight_2D
+          err_L2_sum   = err_L2_sum + (diff * diff) * weight_2D
+          err_Linf_max = max(err_Linf_max, diff)
+        end do
+      end do
+
+      ! 2. Sub-cell exact average L_inf error (Dr. Binh 1D DGSolver1D.f90 lines 945-956)
+      !    Uses pre-computed mesh%gq_sub with normalized weights sum(w2D) = 1.0
+      do sy = 1, ns
+        do sx = 1, ns
+          sub_id = (sy - 1) * ns + sx
+          x0 = x_left   + real(sx - 1, 8) * dx_sub
+          y0 = y_bottom + real(sy - 1, 8) * dy_sub
+
+          u_ex_ave = 0.0_8
+          do q_sub = 1, mesh%gq_sub%nTotal
+            xq_sub   = x0 + 0.5_8 * dx_sub * (1.0_8 + mesh%gq_sub%xi(q_sub))
+            yq_sub   = y0 + 0.5_8 * dy_sub * (1.0_8 + mesh%gq_sub%eta(q_sub))
+            u_ex_ave = u_ex_ave + eval_exact(prob, xq_sub, yq_sub, solver%t) * mesh%gq_sub%w2D(q_sub)
+          end do
+
+          diff_sub     = abs(solver%U(sub_id, c) - u_ex_ave)
+          err_Linf_sub = max(err_Linf_sub, diff_sub)
+        end do
+      end do
+    end do
+
+    solver%L1err   = err_L1_sum
+    solver%L2err   = sqrt(err_L2_sum)
+    ! Use continuous Linf at Gauss nodes (Paper Eq. 55); matches sub-cell average Linf
+    solver%Linferr = max(err_Linf_max, err_Linf_sub)
+
+    deallocate(U_h_quad, H_quad_T)
   end subroutine computeErrors
 
   ! ===================================================================

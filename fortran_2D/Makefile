@@ -5,6 +5,7 @@ TARGET  = solver2d
 
 # Object files in strict dependency order
 OBJS = GaussQuadrature1D.o \
+       GaussQuadrature2D.o \
        LinAlg.o            \
        WENO.o              \
        PDE2D.o             \
@@ -23,6 +24,9 @@ $(TARGET): $(OBJS)
 GaussQuadrature1D.o: GaussQuadrature1D.f90
 	$(FC) $(FFLAGS) -c $<
 
+GaussQuadrature2D.o: GaussQuadrature2D.f90 GaussQuadrature1D.o
+	$(FC) $(FFLAGS) -c $<
+
 LinAlg.o: LinAlg.f90
 	$(FC) $(FFLAGS) -c $<
 
@@ -35,10 +39,10 @@ PDE2D.o: PDE2D.f90
 Prob2D.o: Prob2D.f90 PDE2D.o
 	$(FC) $(FFLAGS) -c $<
 
-Mesh2D.o: Mesh2D.f90 Prob2D.o GaussQuadrature1D.o LinAlg.o
-	$(FC) $(FFLAGS) -c $<s
+Mesh2D.o: Mesh2D.f90 Prob2D.o GaussQuadrature1D.o GaussQuadrature2D.o LinAlg.o
+	$(FC) $(FFLAGS) -c $<
 
-Solver2D.o: Solver2D.f90 PDE2D.o Prob2D.o Mesh2D.o WENO.o GaussQuadrature1D.o
+Solver2D.o: Solver2D.f90 PDE2D.o Prob2D.o Mesh2D.o WENO.o GaussQuadrature1D.o GaussQuadrature2D.o
 	$(FC) $(FFLAGS) -c $<
 
 main_Solver2D.o: main_Solver2D.f90 Prob2D.o Mesh2D.o Solver2D.o

@@ -1,6 +1,7 @@
 module Mesh2D
   use Prob2D
   use GaussQuadrature1D
+  use GaussQuadrature2D
   use LinAlg
   implicit none
 
@@ -74,6 +75,9 @@ module Mesh2D
     real(8), allocatable :: H_bound_R(:)   ! (n_sub)
     real(8), allocatable :: xq(:)          ! (n_quad)
     real(8), allocatable :: wq(:)          ! (n_quad)
+
+    ! Pre-computed 2D Gauss-Legendre quadrature on reference sub-cell [-1, 1] x [-1, 1]
+    type(GaussQuadrature2D_t) :: gq_sub
   end type Mesh2D_t
 
 contains
@@ -107,6 +111,7 @@ contains
 
     call generateMesh(mesh, prob)
     call initReferenceMath(mesh)
+    call init_GaussQuadrature2D(mesh%gq_sub, 5)
   end subroutine init_Mesh2D
 
   ! -------------------------------------------------------------------
@@ -417,6 +422,7 @@ contains
     if (allocated(mesh%H_bound_R)) deallocate(mesh%H_bound_R)
     if (allocated(mesh%xq))        deallocate(mesh%xq)
     if (allocated(mesh%wq))        deallocate(mesh%wq)
+    call free_GaussQuadrature2D(mesh%gq_sub)
   end subroutine free_Mesh2D
 
 end module Mesh2D
